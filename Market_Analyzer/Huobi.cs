@@ -4,9 +4,10 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net.WebSockets;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
-
 using Newtonsoft.Json;
+using System.IO.Compression;
 
 namespace Test_SaveData
 {
@@ -103,25 +104,164 @@ namespace Test_SaveData
     }
 
 
-    internal class Huobi
+    internal class Huobi : IDisposable
     {
-        // public static async Task<int> GetSymbolAsync()
-        // получить информацию о торговых символах
-
+        private string wsUrl = "wss://api.huobi.pro/ws";
         public static HuobiRootSymbolInfo? SymbolInfo;
-        public ClientWebSocket ClientWS = null;
+        public ClientWebSocket? ClientWS = null;
+        private CancellationTokenSource? CTS;
         private string SubscribeStr;
         public ListSymbol DataSymbol = new ListSymbol();
-
-
+        
         public Huobi (string Str)
         {
             this.SubscribeStr = Str;
+            GetSymbolAsync();
             DataSymbol.loadFromFile("Huobi*");
             DataSymbol.loadHistoryFromServer(this.SubscribeStr);
+            ConnectAsync();
+        }
+
+        public async Task ConnectAsync()
+        {
+            if (ClientWS != null)
+            {
+                if (ClientWS.State == WebSocketState.Open) return;
+                else ClientWS.Dispose();
+            }
+            ClientWS = new ClientWebSocket();
+            if (CTS != null) CTS.Dispose();
+            CTS = new CancellationTokenSource();
+            await ClientWS.ConnectAsync(new Uri(wsUrl), CTS.Token);
+
             SubscribeCandle();
 
+            await Task.Factory.StartNew(ReceiveLoop, CTS.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         }
+
+        private async Task ReceiveLoop()
+        {
+            var loopToken = CTS.Token;
+            MemoryStream outputStream = null;
+            WebSocketReceiveResult receiveResult = null;
+            var buffer = new byte[8192];
+            try
+            {
+                Console.WriteLine("Start loop");
+                while (!loopToken.IsCancellationRequested)
+                {
+                    outputStream = new MemoryStream(8192);
+                    do
+                    {
+                        receiveResult = await ClientWS.ReceiveAsync(buffer, CTS.Token);
+                        if (receiveResult.MessageType != WebSocketMessageType.Close)
+                            outputStream.Write(buffer, 0, receiveResult.Count);
+                    }
+                    while (!receiveResult.EndOfMessage);
+                    if (receiveResult.MessageType == WebSocketMessageType.Close) break;
+                    outputStream.Position = 0;
+                    ResponseReceived(outputStream);
+                }
+                Console.WriteLine("IsCancellationRequested");
+            }
+            catch (TaskCanceledException e)
+            {
+                Console.WriteLine(e.Message);
+            }
+            finally
+            {
+                outputStream?.Dispose();
+            }
+        }
+
+        private async Task ResponseReceived(Stream inputStream)
+        {
+            // TODO: handle deserializing responses and matching them to the requests.
+            // IMPORTANT: DON'T FORGET TO DISPOSE THE inputStream!
+            var buffer = new byte[8192];
+            try
+            {
+                int countByte = inputStream.Read(buffer);
+                //var response = Encoding.UTF8.GetString(buffer, 0, countByte);
+                Stream st = new MemoryStream(buffer);
+                var decompressor = new GZipStream(st, CompressionMode.Decompress);
+                var resultStream = new MemoryStream();
+                decompressor.CopyTo(resultStream);
+                String StrIn = new string(Encoding.UTF8.GetString(resultStream.ToArray()));
+                if (StrIn.Contains("ping"))
+                {
+                    Console.WriteLine(StrIn);
+                    String StrOut = StrIn.Replace("ping", "pong");
+                    ArraySegment<byte> arraySegment = new ArraySegment<byte>(Encoding.UTF8.GetBytes(StrOut));
+                    await ClientWS.SendAsync(arraySegment, WebSocketMessageType.Text, true, CancellationToken.None);
+                }
+                if (!StrIn.Contains("ch") && !StrIn.Contains("ping"))
+                {
+                    Console.WriteLine(StrIn);
+                }
+                else
+                {
+                    if (StrIn.Contains("ch"))
+                    {
+                        HuobiRootTickCandle HRTick = JsonConvert.DeserializeObject<HuobiRootTickCandle>(StrIn);
+                        Int32 tempFindIndex = DataSymbol.FindIndex(item => item.SymbolName == HRTick.ch.Split('.')[1]);
+                        if (HRTick.tick.id == DataSymbol[tempFindIndex].m1[0].UnixTimeGMT)
+                        {
+                            DataSymbol[tempFindIndex].m1[0].Lo = HRTick.tick.low;
+                            DataSymbol[tempFindIndex].m1[0].Hi = HRTick.tick.high;
+                            DataSymbol[tempFindIndex].m1[0].Close = HRTick.tick.close;
+                            DataSymbol[tempFindIndex].m1[0].Amount = HRTick.tick.amount;
+                            DataSymbol[tempFindIndex].m1[0].Vol = HRTick.tick.vol;
+                            DataSymbol[tempFindIndex].m1[0].Count = HRTick.tick.count;
+                        }
+                        else
+                        {
+                            // новая свеча
+                            DataSymbol[tempFindIndex].m1.Insert(0, new Candle(HRTick.ch, HRTick.tick.id, HRTick.tick.open, HRTick.tick.high, HRTick.tick.low,
+                                HRTick.tick.close, HRTick.tick.amount, HRTick.tick.vol, HRTick.tick.count));
+
+                            DateTime tDate = DateTime.Now;
+                            DateTime FileDate = new DateTime(tDate.Year, tDate.Month, tDate.Day, tDate.Hour, 0, 0);
+                            StreamWriter swLogS1 = new StreamWriter($"Data\\Huobi_{FileDate.Year:d4}_{FileDate.Month:d2}_{FileDate.Day:d2}_m1.txt", true, System.Text.Encoding.UTF8);
+                            swLogS1.WriteLine($"{DataSymbol[tempFindIndex].m1[1].UnixTimeGMT} " +
+                                $"{DataSymbol[tempFindIndex].SymbolName} " +
+                                $"{DataSymbol[tempFindIndex].m1[1].Open:F10} " +
+                                $"{DataSymbol[tempFindIndex].m1[1].Hi:F10} " +
+                                $"{DataSymbol[tempFindIndex].m1[1].Lo:F10} " +
+                                $"{DataSymbol[tempFindIndex].m1[1].Close:F10} " +
+                                $"{DataSymbol[tempFindIndex].m1[1].Amount:F10} " +
+                                $"{DataSymbol[tempFindIndex].m1[1].Vol:F10} " +
+                                $"{DataSymbol[tempFindIndex].m1[1].Count} "
+                                );
+                            swLogS1.Close();
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e.Message);
+            }
+        }
+
+        public async Task DisconnectAsync()
+        {
+            Console.WriteLine("Dispose");
+            if (ClientWS is null) return;
+            // TODO: requests cleanup code, sub-protocol dependent.
+            if (ClientWS.State == WebSocketState.Open)
+            {
+                CTS.CancelAfter(TimeSpan.FromSeconds(2));
+                await ClientWS.CloseOutputAsync(WebSocketCloseStatus.Empty, "", CancellationToken.None);
+                await ClientWS.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
+            }
+            ClientWS.Dispose();
+            ClientWS = null;
+            CTS.Dispose();
+            CTS = null;
+        }
+        //public void Dispose() => DisconnectAsync();.Wait()
+        public void Dispose() => DisconnectAsync();
 
         public int SaveData()
         {
@@ -143,22 +283,21 @@ namespace Test_SaveData
             client.Dispose();
             return SymbolInfo.data.Count;
         }
-        public async Task<int> SubscribeCandle()
+
+        public async Task SubscribeCandle()
         {
             // подписывается через вебсокет на получение сигналов
             // по указанным парам (через запятую
             // ALLONLINE - все торгуемые пары (SymbolInfo[].state = "online"
-            // Out:
-            // 0 - если запрос в Str выполнен удачно
-            // 1 - если ошибка
-            ClientWS = new ClientWebSocket();
-            await ClientWS.ConnectAsync(new Uri("wss://api.huobi.pro/ws"), CancellationToken.None);
+
+            //ClientWS = new ClientWebSocket();
+            //await ClientWS.ConnectAsync(new Uri("wss://api.huobi.pro/ws"), CancellationToken.None);
             //ClientWS.Options.KeepAliveInterval = TimeSpan.Zero;
 
             if (SubscribeStr.Contains("ALLONLINE"))
             {
                 Console.WriteLine("11111111111111");
-                return 1;
+                return;
             }
             else
             {
@@ -173,9 +312,7 @@ namespace Test_SaveData
                     await ClientWS.SendAsync(SubAsBytes, WebSocketMessageType.Text, true, CancellationToken.None);
                 }
             }
-            return 0;
-
+            return;
         }
-
     }
 }
