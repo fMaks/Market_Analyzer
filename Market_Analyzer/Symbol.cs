@@ -3,9 +3,10 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using Test_SaveData;
 
-namespace Test_SaveData
+using Market_Analizer;
+
+namespace Market_Analizer
 {
     internal class Symbol
     {
@@ -25,16 +26,21 @@ namespace Test_SaveData
             m5.Insert(0, new Candle(Str));
             m15 = new List<Candle>();
             m15.Insert(0, new Candle(Str));
-
         }
 
         public Symbol (string Name, HuobiHistoryDatum datum)
         {
             this.SymbolName = Name;
             m1 = new List<Candle>();
-
-
         }
+
+        public Symbol (HuobiRootTickCandle HRTick)
+        {
+            this.SymbolName = HRTick.ch.Split('.')[1];
+            m1 = new List<Candle>();
+            m1.Insert(0, new Candle(HRTick));
+        }
+
         public void AddTick(string Str)
         {
             string[] SubStr = Str.Split(' ', StringSplitOptions.RemoveEmptyEntries);

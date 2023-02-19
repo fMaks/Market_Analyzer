@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace Test_SaveData
+namespace Market_Analizer
 {
     internal class Candle
     {
@@ -41,6 +41,18 @@ namespace Test_SaveData
             this.Count = count;
             this.Amount = amount;
             this.Vol = vol;
+        }
+
+        public Candle(HuobiRootTickCandle HRTick)
+        {
+            this.UnixTimeGMT = HRTick.ts;
+            this.Open = HRTick.tick.open;
+            this.Lo = HRTick.tick.low;
+            this.Hi = HRTick.tick.high;
+            this.Close = HRTick.tick.close;
+            this.Count = HRTick.tick.count;
+            this.Amount = HRTick.tick.amount;
+            this.Vol = HRTick.tick.vol;
         }
 
         public void UpdateCandle (string Str)

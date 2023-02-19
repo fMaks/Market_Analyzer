@@ -8,8 +8,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using System.IO.Compression;
+using System.Reflection.Metadata;
+using NLog;
 
-namespace Test_SaveData
+namespace Market_Analizer
 {
     public class HuobiRootSymbolInfo
     {
@@ -106,19 +108,26 @@ namespace Test_SaveData
 
     internal class Huobi : IDisposable
     {
+        private Int64 PingPongCount = 0;
         private string wsUrl = "wss://api.huobi.pro/ws";
         public static HuobiRootSymbolInfo? SymbolInfo;
         public ClientWebSocket? ClientWS = null;
         private CancellationTokenSource? CTS;
         private string SubscribeStr;
         public ListSymbol DataSymbol = new ListSymbol();
-        
-        public Huobi (string Str)
+        private int flagEndLoadServer = 0;
+        public static Logger logger = LogManager.GetCurrentClassLogger();
+
+        public Huobi(string Str)
         {
             this.SubscribeStr = Str;
             GetSymbolAsync();
             DataSymbol.loadFromFile("Huobi*");
-            DataSymbol.loadHistoryFromServer(this.SubscribeStr);
+            Task<int> statusLoad = DataSymbol.loadHistoryFromServer(this.SubscribeStr);
+            while (statusLoad.Result != 1)
+            {
+                Thread.Sleep(1000);
+            }
             ConnectAsync();
         }
 
@@ -141,16 +150,16 @@ namespace Test_SaveData
 
         private async Task ReceiveLoop()
         {
+            int BUFSIZE = 16384;
             var loopToken = CTS.Token;
             MemoryStream outputStream = null;
             WebSocketReceiveResult receiveResult = null;
-            var buffer = new byte[8192];
+            var buffer = new byte[BUFSIZE];
             try
             {
-                Console.WriteLine("Start loop");
                 while (!loopToken.IsCancellationRequested)
                 {
-                    outputStream = new MemoryStream(8192);
+                    outputStream = new MemoryStream(BUFSIZE);
                     do
                     {
                         receiveResult = await ClientWS.ReceiveAsync(buffer, CTS.Token);
@@ -162,11 +171,27 @@ namespace Test_SaveData
                     outputStream.Position = 0;
                     ResponseReceived(outputStream);
                 }
-                Console.WriteLine("IsCancellationRequested");
             }
             catch (TaskCanceledException e)
             {
+                logger.Info("TaskCancelException");
+                logger.Info(e);
+                Console.WriteLine("TaskCancelException");
                 Console.WriteLine(e.Message);
+            }
+            catch (WebSocketException e)
+            {
+                //Console.WriteLine($"Websocket exception : {e.Message}");
+                Console.WriteLine("Reconnect");
+                logger.Info(e);
+                logger.Info("Reconnect");
+                ConnectAsync();
+            }
+            catch (Exception e)
+            {
+                logger.Warn(e);
+                Console.WriteLine("Exception in loop cicle");
+                Console.WriteLine(e);
             }
             finally
             {
@@ -176,13 +201,10 @@ namespace Test_SaveData
 
         private async Task ResponseReceived(Stream inputStream)
         {
-            // TODO: handle deserializing responses and matching them to the requests.
-            // IMPORTANT: DON'T FORGET TO DISPOSE THE inputStream!
             var buffer = new byte[8192];
             try
             {
                 int countByte = inputStream.Read(buffer);
-                //var response = Encoding.UTF8.GetString(buffer, 0, countByte);
                 Stream st = new MemoryStream(buffer);
                 var decompressor = new GZipStream(st, CompressionMode.Decompress);
                 var resultStream = new MemoryStream();
@@ -190,65 +212,85 @@ namespace Test_SaveData
                 String StrIn = new string(Encoding.UTF8.GetString(resultStream.ToArray()));
                 if (StrIn.Contains("ping"))
                 {
-                    Console.WriteLine(StrIn);
                     String StrOut = StrIn.Replace("ping", "pong");
                     ArraySegment<byte> arraySegment = new ArraySegment<byte>(Encoding.UTF8.GetBytes(StrOut));
                     await ClientWS.SendAsync(arraySegment, WebSocketMessageType.Text, true, CancellationToken.None);
-                }
-                if (!StrIn.Contains("ch") && !StrIn.Contains("ping"))
-                {
-                    Console.WriteLine(StrIn);
+                    (int consoleLeft, int consoleTop) = Console.GetCursorPosition();
+                    Console.SetCursorPosition(0, consoleTop);
+                    PingPongCount++;
+                    Console.Write($"Ping-Pong count: {PingPongCount:D6}");
                 }
                 else
                 {
-                    if (StrIn.Contains("ch"))
+                    if (StrIn.Contains("subbed"))
                     {
-                        HuobiRootTickCandle HRTick = JsonConvert.DeserializeObject<HuobiRootTickCandle>(StrIn);
-                        Int32 tempFindIndex = DataSymbol.FindIndex(item => item.SymbolName == HRTick.ch.Split('.')[1]);
-                        if (HRTick.tick.id == DataSymbol[tempFindIndex].m1[0].UnixTimeGMT)
+
+                    }
+                    else
+                    {
+                        if (StrIn.Contains("\"ch\""))
                         {
-                            DataSymbol[tempFindIndex].m1[0].Lo = HRTick.tick.low;
-                            DataSymbol[tempFindIndex].m1[0].Hi = HRTick.tick.high;
-                            DataSymbol[tempFindIndex].m1[0].Close = HRTick.tick.close;
-                            DataSymbol[tempFindIndex].m1[0].Amount = HRTick.tick.amount;
-                            DataSymbol[tempFindIndex].m1[0].Vol = HRTick.tick.vol;
-                            DataSymbol[tempFindIndex].m1[0].Count = HRTick.tick.count;
+                            HuobiRootTickCandle HRTick = JsonConvert.DeserializeObject<HuobiRootTickCandle>(StrIn);
+                            Int32 tempFindIndex = DataSymbol.FindIndex(item => item.SymbolName == HRTick.ch.Split('.')[1]);
+                            if (tempFindIndex == -1)
+                            {
+                                Console.WriteLine("BBBBBB");
+                                DataSymbol.Add(new Symbol(HRTick));
+                            }
+                            else
+                            {
+                                if (HRTick.tick.id == DataSymbol[tempFindIndex].m1[0].UnixTimeGMT)
+                                {
+                                    DataSymbol[tempFindIndex].m1[0].Lo = HRTick.tick.low;
+                                    DataSymbol[tempFindIndex].m1[0].Hi = HRTick.tick.high;
+                                    DataSymbol[tempFindIndex].m1[0].Close = HRTick.tick.close;
+                                    DataSymbol[tempFindIndex].m1[0].Amount = HRTick.tick.amount;
+                                    DataSymbol[tempFindIndex].m1[0].Vol = HRTick.tick.vol;
+                                    DataSymbol[tempFindIndex].m1[0].Count = HRTick.tick.count;
+                                }
+                                else
+                                {
+                                    // новая свеча
+                                    DataSymbol[tempFindIndex].m1.Insert(0, new Candle(HRTick.ch, HRTick.tick.id, HRTick.tick.open, HRTick.tick.high, HRTick.tick.low,
+                                        HRTick.tick.close, HRTick.tick.amount, HRTick.tick.vol, HRTick.tick.count));
+
+                                    DateTime tDate = DateTime.Now;
+                                    DateTime FileDate = new DateTime(tDate.Year, tDate.Month, tDate.Day, tDate.Hour, 0, 0);
+                                    StreamWriter swLogS1 = new StreamWriter($"Data\\Huobi_{FileDate.Year:d4}_{FileDate.Month:d2}_{FileDate.Day:d2}_m1.txt", true, System.Text.Encoding.UTF8);
+                                    swLogS1.WriteLine($"{DataSymbol[tempFindIndex].m1[1].UnixTimeGMT} " +
+                                        $"{DataSymbol[tempFindIndex].SymbolName} " +
+                                        $"{DataSymbol[tempFindIndex].m1[1].Open:F10} " +
+                                        $"{DataSymbol[tempFindIndex].m1[1].Hi:F10} " +
+                                        $"{DataSymbol[tempFindIndex].m1[1].Lo:F10} " +
+                                        $"{DataSymbol[tempFindIndex].m1[1].Close:F10} " +
+                                        $"{DataSymbol[tempFindIndex].m1[1].Amount:F10} " +
+                                        $"{DataSymbol[tempFindIndex].m1[1].Vol:F10} " +
+                                        $"{DataSymbol[tempFindIndex].m1[1].Count} "
+                                        );
+                                    swLogS1.Close();
+                                }
+                            }
                         }
                         else
                         {
-                            // новая свеча
-                            DataSymbol[tempFindIndex].m1.Insert(0, new Candle(HRTick.ch, HRTick.tick.id, HRTick.tick.open, HRTick.tick.high, HRTick.tick.low,
-                                HRTick.tick.close, HRTick.tick.amount, HRTick.tick.vol, HRTick.tick.count));
-
-                            DateTime tDate = DateTime.Now;
-                            DateTime FileDate = new DateTime(tDate.Year, tDate.Month, tDate.Day, tDate.Hour, 0, 0);
-                            StreamWriter swLogS1 = new StreamWriter($"Data\\Huobi_{FileDate.Year:d4}_{FileDate.Month:d2}_{FileDate.Day:d2}_m1.txt", true, System.Text.Encoding.UTF8);
-                            swLogS1.WriteLine($"{DataSymbol[tempFindIndex].m1[1].UnixTimeGMT} " +
-                                $"{DataSymbol[tempFindIndex].SymbolName} " +
-                                $"{DataSymbol[tempFindIndex].m1[1].Open:F10} " +
-                                $"{DataSymbol[tempFindIndex].m1[1].Hi:F10} " +
-                                $"{DataSymbol[tempFindIndex].m1[1].Lo:F10} " +
-                                $"{DataSymbol[tempFindIndex].m1[1].Close:F10} " +
-                                $"{DataSymbol[tempFindIndex].m1[1].Amount:F10} " +
-                                $"{DataSymbol[tempFindIndex].m1[1].Vol:F10} " +
-                                $"{DataSymbol[tempFindIndex].m1[1].Count} "
-                                );
-                            swLogS1.Close();
+                            logger.Debug("Не обработанный ответ от сервера");
+                            logger.Debug(StrIn);
                         }
                     }
                 }
             }
             catch (Exception e)
             {
+                logger.Error(e);
+                Console.WriteLine("AAAAA");
                 Console.WriteLine(e.Message);
             }
         }
 
         public async Task DisconnectAsync()
         {
-            Console.WriteLine("Dispose");
+            Console.WriteLine("\nDispose");
             if (ClientWS is null) return;
-            // TODO: requests cleanup code, sub-protocol dependent.
             if (ClientWS.State == WebSocketState.Open)
             {
                 CTS.CancelAfter(TimeSpan.FromSeconds(2));
@@ -259,6 +301,7 @@ namespace Test_SaveData
             ClientWS = null;
             CTS.Dispose();
             CTS = null;
+            NLog.LogManager.Shutdown();
         }
         //public void Dispose() => DisconnectAsync();.Wait()
         public void Dispose() => DisconnectAsync();

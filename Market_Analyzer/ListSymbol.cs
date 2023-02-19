@@ -1,19 +1,20 @@
 ﻿using Newtonsoft.Json;
+using NLog;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using static System.Runtime.InteropServices.JavaScript.JSType;
 
-namespace Test_SaveData
+namespace Market_Analizer
 {
     internal class ListSymbol : List<Symbol>
     {
+        public static Logger logger = LogManager.GetCurrentClassLogger();
         public async Task<int> loadFromFile(string maskFile)
         {
-            Console.WriteLine("Загрузка сохраненных данных...");
+            Console.Write("Загрузка сохраненных данных");
             Stopwatch stopwatch = new Stopwatch();
             stopwatch.Start();
 
@@ -37,15 +38,15 @@ namespace Test_SaveData
                     }
                 }
                 sr.Close();
-                Console.WriteLine(file);
+                logger.Debug($"Загрузка из файла {file}");
             }
             stopwatch.Stop();
             for (int I =0; I < this.Count; I++)
             {
                 this[I].m1.Sort((a, b) => b.UnixTimeGMT.CompareTo(a.UnixTimeGMT));
             }
-            Console.WriteLine("Загрузка завершена за {0:f3} с", stopwatch.ElapsedMilliseconds/1000.0);
-
+            Console.WriteLine(" завершена за {0:f3} с", stopwatch.ElapsedMilliseconds/1000.0);
+            logger.Debug("Загрузка завершена за {0:f3} с", stopwatch.ElapsedMilliseconds / 1000.0);
 
             return 0;
         }
@@ -54,7 +55,8 @@ namespace Test_SaveData
         {
             Stopwatch stopwatch = new Stopwatch();
             stopwatch.Start();
-            Console.WriteLine("Загрузка данных с сервера");
+            logger.Debug("Загрузка данных с сервера");
+            Console.Write("Загрузка данных с сервера");
             string respBody = string.Empty;
             HuobiHistoryRoot HistoryKline;
 
@@ -64,7 +66,23 @@ namespace Test_SaveData
             foreach (string subStr in SubStr)
             {
                 HttpClient client = new HttpClient();
-                HttpResponseMessage respInfo = await client.GetAsync("https://api.huobi.pro/market/history/kline?period=1min&size=2000&symbol=" + subStr);
+                HttpResponseMessage respInfo;
+
+                // определяем сколько нужно подгрузить свечей из истории
+                // в m1[0] - последняя сохраненная свеча в файле
+                Int32 FindIndex = this.FindIndex(item => item.SymbolName == subStr);
+                if (FindIndex != -1)
+                {
+                    long lastTime = this[FindIndex].m1[0].UnixTimeGMT;
+                    DateTime date = DateTime.Now;
+                    long currentUnixTime = (uint)(date.ToUniversalTime() - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+                    int countLoad = Math.Min(2000, (int)Math.Ceiling(((currentUnixTime - lastTime)/60.0)));
+                    respInfo = await client.GetAsync("https://api.huobi.pro/market/history/kline?period=1min&size=" + countLoad.ToString() + "&symbol=" + subStr);
+                }
+                else
+                {
+                    respInfo = await client.GetAsync("https://api.huobi.pro/market/history/kline?period=1min&size=2000&symbol=" + subStr);
+                }
                 respInfo.EnsureSuccessStatusCode();
                 respBody = await respInfo.Content.ReadAsStringAsync();
                 HistoryKline = JsonConvert.DeserializeObject<HuobiHistoryRoot>(respBody);
@@ -91,9 +109,11 @@ namespace Test_SaveData
             }
             
             stopwatch.Stop();
-            Console.WriteLine("Загрузка завершена за {0:F3} с", stopwatch.ElapsedMilliseconds / 1000.0);
-
-            return 0;
+            //(int consoleLeft, int consoleTop) = Console.GetCursorPosition();
+            //Console.SetCursorPosition(0, consoleTop);
+            Console.WriteLine(" завершена за {0:F3} с", stopwatch.ElapsedMilliseconds / 1000.0);
+            logger.Debug("загрузка завершена за {0:F3} с", stopwatch.ElapsedMilliseconds / 1000.0);
+            return 1;
         }
     }
 }
