@@ -10,6 +10,13 @@ using Newtonsoft.Json;
 using System.IO.Compression;
 using System.Reflection.Metadata;
 using NLog;
+using NLog.Fluent;
+using Telegram.Bot;
+using Telegram.Bot.Exceptions;
+using Telegram.Bot.Polling;
+using Telegram.Bot.Types;
+using Telegram.Bot.Types.Enums;
+using IniFiles;
 
 namespace Market_Analizer
 {
@@ -29,7 +36,7 @@ namespace Market_Analizer
         public int sm { get; set; }
         public string sc { get; set; }
         public object lr { get; set; }
-        public int tpp { get; set; }
+        public int tpp { get; set; }        // точность торговой цены
         public bool te { get; set; }
         public string bcdn { get; set; }
         public string qcdn { get; set; }
@@ -69,12 +76,12 @@ namespace Market_Analizer
     public class HuobiHistoryDatum
     {
         public int id { get; set; }
-        public float open { get; set; }
-        public float close { get; set; }
-        public float low { get; set; }
-        public float high { get; set; }
-        public float amount { get; set; }
-        public float vol { get; set; }
+        public decimal open { get; set; }
+        public decimal close { get; set; }
+        public decimal low { get; set; }
+        public decimal high { get; set; }
+        public decimal amount { get; set; }
+        public decimal vol { get; set; }
         public int count { get; set; }
     }
 
@@ -96,12 +103,12 @@ namespace Market_Analizer
     public class HuobiTickCandle
     {
         public long id { get; set; }
-        public float open { get; set; }
-        public float close { get; set; }
-        public float low { get; set; }
-        public float high { get; set; }
-        public float amount { get; set; }
-        public float vol { get; set; }
+        public decimal open { get; set; }
+        public decimal close { get; set; }
+        public decimal low { get; set; }
+        public decimal high { get; set; }
+        public decimal amount { get; set; }
+        public decimal vol { get; set; }
         public int count { get; set; }
     }
 
@@ -115,34 +122,80 @@ namespace Market_Analizer
         private CancellationTokenSource? CTS;
         private string SubscribeStr;
         public ListSymbol DataSymbol = new ListSymbol();
-        private int flagEndLoadServer = 0;
+        static int flagEndLoadServer = 0;
         public static Logger logger = LogManager.GetCurrentClassLogger();
 
         public Huobi(string Str)
         {
             this.SubscribeStr = Str;
-            GetSymbolAsync();
-            DataSymbol.loadFromFile("Huobi*");
-            Task<int> statusLoad = DataSymbol.loadHistoryFromServer(this.SubscribeStr);
-            while (statusLoad.Result != 1)
+            Task<int> statusLoad = Task.FromResult(0);
+            statusLoad = GetSymbolAsync();
+            while (statusLoad.Result == 0)
             {
                 Thread.Sleep(1000);
             }
+            statusLoad = Task.FromResult(1);
+            statusLoad = DataSymbol.loadFromFile("Huobi*");
+            while (statusLoad.Result != 0)
+            {
+                Thread.Sleep(1000);
+            }
+            statusLoad = Task.FromResult(1);
+            statusLoad = DataSymbol.loadHistoryFromServer(this.SubscribeStr);
+            while (statusLoad.Result != 0)
+            {
+                Thread.Sleep(1000);
+            }
+
+            flagEndLoadServer = 1;
+            //добавить в массив значение tpp
+            foreach (Symbol Symb in DataSymbol)
+            {
+                Int32 tempFindIndex = SymbolInfo.data.FindIndex(item => item.sc == Symb.SymbolName);
+                if (tempFindIndex != -1)
+                {
+                    Symb.tpp = SymbolInfo.data[tempFindIndex].tpp;
+                }
+            }
+            DataSymbol.resizeTF();
             ConnectAsync();
+        }
+
+        public static async Task<string> GetSymbolHistoryAsync(string symbol, string tf, int count)
+        {
+            // получает историю свечей
+            // symbol - имя символа
+            // count - количество свечей
+            // tf - таймфрейм
+            HttpClient client = new HttpClient();
+            HttpResponseMessage respInfo;
+            respInfo = await client.GetAsync("https://api.huobi.pro/market/history/kline?period=" + tf + "&size=" + count.ToString() + "&symbol=" + symbol);
+            respInfo.EnsureSuccessStatusCode();
+            return await respInfo.Content.ReadAsStringAsync();
         }
 
         public async Task ConnectAsync()
         {
+            logger.Debug("Start connect");
             if (ClientWS != null)
             {
-                if (ClientWS.State == WebSocketState.Open) return;
-                else ClientWS.Dispose();
+                logger.Debug("Connect - StartWS != null");
+                if (ClientWS.State == WebSocketState.Open)
+                {
+                    logger.Debug("StartWS.State = Open");
+                    return;
+                }
+                ClientWS.Dispose();
+                //ClientWS = new ClientWebSocket();
             }
             ClientWS = new ClientWebSocket();
-            if (CTS != null) CTS.Dispose();
+            if (CTS != null)
+            {
+                logger.Debug("Connect - CTS != null");
+                CTS.Dispose();
+            }
             CTS = new CancellationTokenSource();
             await ClientWS.ConnectAsync(new Uri(wsUrl), CTS.Token);
-
             SubscribeCandle();
 
             await Task.Factory.StartNew(ReceiveLoop, CTS.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
@@ -150,11 +203,14 @@ namespace Market_Analizer
 
         private async Task ReceiveLoop()
         {
+            logger.Debug($"{nameof(ReceiveLoop)}");
             int BUFSIZE = 16384;
             var loopToken = CTS.Token;
+            logger.Debug(loopToken);
             MemoryStream outputStream = null;
             WebSocketReceiveResult receiveResult = null;
             var buffer = new byte[BUFSIZE];
+            // === переделать try-except
             try
             {
                 while (!loopToken.IsCancellationRequested)
@@ -176,26 +232,25 @@ namespace Market_Analizer
             {
                 logger.Info("TaskCancelException");
                 logger.Info(e);
-                Console.WriteLine("TaskCancelException");
-                Console.WriteLine(e.Message);
+                Console.WriteLine("Exit");
+                return;
             }
             catch (WebSocketException e)
             {
                 //Console.WriteLine($"Websocket exception : {e.Message}");
-                Console.WriteLine("Reconnect");
                 logger.Info(e);
-                logger.Info("Reconnect");
-                ConnectAsync();
             }
             catch (Exception e)
             {
                 logger.Warn(e);
-                Console.WriteLine("Exception in loop cicle");
-                Console.WriteLine(e);
             }
             finally
             {
-                outputStream?.Dispose();
+                logger.Debug("Try-catch-Finally");
+                //outputStream?.Dispose();
+                logger.Info("Reconnect");
+                Console.WriteLine("\nReconnect");
+                ConnectAsync();
             }
         }
 
@@ -224,7 +279,7 @@ namespace Market_Analizer
                 {
                     if (StrIn.Contains("subbed"))
                     {
-
+                        logger.Info(StrIn);
                     }
                     else
                     {
@@ -251,20 +306,20 @@ namespace Market_Analizer
                                 else
                                 {
                                     // новая свеча
-                                    DataSymbol[tempFindIndex].m1.Insert(0, new Candle(HRTick.ch, HRTick.tick.id, HRTick.tick.open, HRTick.tick.high, HRTick.tick.low,
-                                        HRTick.tick.close, HRTick.tick.amount, HRTick.tick.vol, HRTick.tick.count));
+                                    DataSymbol[tempFindIndex].AddTick(HRTick.tick.id, HRTick.tick.open, HRTick.tick.high, HRTick.tick.low,
+                                        HRTick.tick.close, HRTick.tick.amount, HRTick.tick.vol, HRTick.tick.count);
 
                                     DateTime tDate = DateTime.Now;
                                     DateTime FileDate = new DateTime(tDate.Year, tDate.Month, tDate.Day, tDate.Hour, 0, 0);
                                     StreamWriter swLogS1 = new StreamWriter($"Data\\Huobi_{FileDate.Year:d4}_{FileDate.Month:d2}_{FileDate.Day:d2}_m1.txt", true, System.Text.Encoding.UTF8);
                                     swLogS1.WriteLine($"{DataSymbol[tempFindIndex].m1[1].UnixTimeGMT} " +
                                         $"{DataSymbol[tempFindIndex].SymbolName} " +
-                                        $"{DataSymbol[tempFindIndex].m1[1].Open:F10} " +
-                                        $"{DataSymbol[tempFindIndex].m1[1].Hi:F10} " +
-                                        $"{DataSymbol[tempFindIndex].m1[1].Lo:F10} " +
-                                        $"{DataSymbol[tempFindIndex].m1[1].Close:F10} " +
-                                        $"{DataSymbol[tempFindIndex].m1[1].Amount:F10} " +
-                                        $"{DataSymbol[tempFindIndex].m1[1].Vol:F10} " +
+                                        $"{DataSymbol[tempFindIndex].m1[1].Open} " +
+                                        $"{DataSymbol[tempFindIndex].m1[1].Hi} " +
+                                        $"{DataSymbol[tempFindIndex].m1[1].Lo} " +
+                                        $"{DataSymbol[tempFindIndex].m1[1].Close} " +
+                                        $"{DataSymbol[tempFindIndex].m1[1].Amount} " +
+                                        $"{DataSymbol[tempFindIndex].m1[1].Vol} " +
                                         $"{DataSymbol[tempFindIndex].m1[1].Count} "
                                         );
                                     swLogS1.Close();
@@ -289,11 +344,11 @@ namespace Market_Analizer
 
         public async Task DisconnectAsync()
         {
-            Console.WriteLine("\nDispose");
+            Console.WriteLine("\nDisconnectAsync()");
             if (ClientWS is null) return;
             if (ClientWS.State == WebSocketState.Open)
             {
-                CTS.CancelAfter(TimeSpan.FromSeconds(2));
+                CTS.CancelAfter(TimeSpan.FromSeconds(3));
                 await ClientWS.CloseOutputAsync(WebSocketCloseStatus.Empty, "", CancellationToken.None);
                 await ClientWS.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
             }
@@ -317,13 +372,29 @@ namespace Market_Analizer
             // data[].sate = "online" - пара торгуется
             // tpp - точность торговой цены (?)
             string respBody = string.Empty;
+            bool statusReqest = false;
+            Console.WriteLine("Получение информации о торгуемых парах");
 
             HttpClient client = new HttpClient();
-            HttpResponseMessage respInfo = await client.GetAsync("https://api.huobi.pro/v2/settings/common/symbols");
-            respInfo.EnsureSuccessStatusCode();
-            respBody = await respInfo.Content.ReadAsStringAsync();
-            SymbolInfo = JsonConvert.DeserializeObject<HuobiRootSymbolInfo>(respBody);
-            client.Dispose();
+            while (!statusReqest)
+            {
+                try
+                {
+                    HttpResponseMessage respInfo = await client.GetAsync("https://api.huobi.pro/v2/settings/common/symbols");
+                    respInfo.EnsureSuccessStatusCode();
+                    respBody = await respInfo.Content.ReadAsStringAsync();
+                    SymbolInfo = JsonConvert.DeserializeObject<HuobiRootSymbolInfo>(respBody);
+                    client.Dispose();
+                    statusReqest = true;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(ex.Message);
+                    logger.Debug($"Загрузка информации не удалась: {ex.Message}");
+                }
+            }
+            Console.WriteLine("Загрузка информации завершена");
+            logger.Info("Загрузка информации завершена");
             return SymbolInfo.data.Count;
         }
 
@@ -337,6 +408,7 @@ namespace Market_Analizer
             //await ClientWS.ConnectAsync(new Uri("wss://api.huobi.pro/ws"), CancellationToken.None);
             //ClientWS.Options.KeepAliveInterval = TimeSpan.Zero;
 
+            logger.Debug("Subscribe");
             if (SubscribeStr.Contains("ALLONLINE"))
             {
                 Console.WriteLine("11111111111111");
@@ -353,6 +425,7 @@ namespace Market_Analizer
                     string Subscribe = "{\"sub\":\"market." + Symbol + ".kline.1min\",\"id\":\"55555\"}";
                     byte[] SubAsBytes = Encoding.UTF8.GetBytes(Subscribe);
                     await ClientWS.SendAsync(SubAsBytes, WebSocketMessageType.Text, true, CancellationToken.None);
+                    logger.Debug($"Subscribe: {Subscribe}");
                 }
             }
             return;

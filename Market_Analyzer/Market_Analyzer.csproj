@@ -7,13 +7,16 @@
     <Nullable>enable</Nullable>
     <Deterministic>false</Deterministic>
     <AssemblyName>$(MSBuildProjectName)</AssemblyName>
-    <AssemblyVersion>0.1.1.14</AssemblyVersion>
-    <FileVersion>0.1.1.14</FileVersion>
+    <AssemblyVersion>0.1.2.222</AssemblyVersion>
+    <FileVersion>0.1.2.222</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Newtonsoft.Json" Version="13.0.2" />
     <PackageReference Include="NLog" Version="5.1.1" />
+    <PackageReference Include="System.Drawing.Common" Version="8.0.0-preview.1.23110.8" />
+    <PackageReference Include="Telegram.Bot" Version="19.0.0-preview.2" />
+    <PackageReference Include="Telegram.Bots.Extensions.Polling" Version="5.9.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -37,6 +40,9 @@
     </None>
     <None Update="NLog.config">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="TBot\token.ini">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
 
